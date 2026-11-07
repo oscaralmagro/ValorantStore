@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -35,6 +36,7 @@ Future<void> main() async {
     await notif.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.requestNotificationsPermission();
   } catch (_) {}
   await loadFavs();
+  await loadOfferCache();
   runApp(const App());
 }
 
@@ -95,6 +97,8 @@ class StoreData {
   Set<String> agents = {};
   bool agentsOk = false;
   List esports = [];
+  Map<String, String>? hdr;
+  String? shard, puuid, name;
 }
 
 final cache = <String, dynamic>{};
@@ -115,7 +119,8 @@ Future<Item> resolve(dynamic type, dynamic id, {String price = '', String old = 
 Future<StoreData> fetchStore(String token) async {
   final h = {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'};
   final ent = jsonDecode((await http.post(Uri.parse('https://entitlements.auth.riotgames.com/api/token/v1'), headers: h, body: '{}')).body)['entitlements_token'];
-  final puuid = jsonDecode((await http.post(Uri.parse('https://auth.riotgames.com/userinfo'), headers: h)).body)['sub'];
+  final ui = jsonDecode((await http.post(Uri.parse('https://auth.riotgames.com/userinfo'), headers: h)).body);
+  final puuid = ui['sub'];
   final ver = jsonDecode((await http.get(Uri.parse('https://valorant-api.com/v1/version'))).body)['data']['riotClientVersion'];
   final plat = base64Encode(utf8.encode(jsonEncode({'platformType': 'PC', 'platformOS': 'Windows', 'platformOSVersion': '10.0.19042.1.256.64bit', 'platformChipset': 'Unknown'})));
   final Map<String, String> sh = {...h, 'X-Riot-Entitlements-JWT': '$ent', 'X-Riot-ClientVersion': '$ver', 'X-Riot-ClientPlatform': plat};
@@ -126,6 +131,10 @@ Future<StoreData> fetchStore(String token) async {
     await vault.write(key: 'shard', value: s);
     final j = jsonDecode(r.body) as Map;
     final out = StoreData();
+    out.hdr = sh;
+    out.shard = s;
+    out.puuid = '$puuid';
+    out.name = '${ui['acct']?['game_name'] ?? ''}#${ui['acct']?['tag_line'] ?? ''}';
     try {
       final w = await http.get(Uri.parse('https://pd.$s.a.pvp.net/store/v1/wallet/$puuid'), headers: sh);
       out.wallet = Map<String, dynamic>.from(jsonDecode(w.body)['Balances'] ?? {});
@@ -147,17 +156,23 @@ Future<StoreData> fetchStore(String token) async {
     try {
       final x = await http.get(Uri.parse('https://pd.$s.a.pvp.net/store/v1/offers/'), headers: sh);
       final offs = (jsonDecode(x.body)['Offers'] ?? []) as List;
-      final m = <String, Map>{};
+      final m = <String, Map>{}, keep = <String, Map>{};
       for (final o in offs) {
         final cost = o['Cost'];
         if (cost is! Map || cost.isEmpty) continue;
-        for (final r in (o['Rewards'] ?? [])) { m['${r['ItemID']}'.toLowerCase()] = cost; }
+        for (final r in (o['Rewards'] ?? [])) {
+          final id = '${r['ItemID']}'.toLowerCase();
+          m[id] = cost;
+          final ty = '${r['ItemTypeID']}';
+          if (ty == 'e7c63390-eda7-46e0-bb7a-a6abdacd2433' || ty == '3ad1b2b2-acdb-4524-852f-954a76ddae0a') keep[id] = cost;
+        }
         m['${o['OfferID']}'.toLowerCase()] = cost;
       }
       if (m.isNotEmpty) {
         offerCost..clear()..addAll(m);
         offersLoaded = true;
         offerTick.value++;
+        saveOfferCache(keep);
       }
     } catch (_) {}
     final lay = j['SkinsPanelLayout'];
@@ -365,7 +380,7 @@ class _HomeState extends State<Home> {
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(
           backgroundColor: bg,
-          title: Text(['Valorant Store', 'Armas', 'Pase de temporada', 'Agentes', 'Esports'][tab], style: const TextStyle(fontWeight: FontWeight.w800)),
+          title: Text(['Valorant Store', 'Armas', 'Pase de temporada', 'Agentes', 'Esports', 'Perfil'][tab], style: const TextStyle(fontWeight: FontWeight.w800)),
           actions: [
             IconButton(onPressed: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const FavPage())), icon: const Icon(Icons.favorite_border), tooltip: 'Mi armario'),
             if (loggedIn && tab == 0) IconButton(onPressed: logout, icon: const Icon(Icons.logout), tooltip: 'Cerrar sesión'),
@@ -378,9 +393,11 @@ class _HomeState extends State<Home> {
             visited.contains(2) ? PassTab(data) : const SizedBox(),
             visited.contains(3) ? AgentsTab(data) : const SizedBox(),
             visited.contains(4) ? const EsportsTab() : const SizedBox(),
+            visited.contains(5) ? ProfileTab(data) : const SizedBox(),
           ]),
         ),
         bottomNavigationBar: NavigationBar(
+          labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
           selectedIndex: tab,
           onDestinationSelected: (i) => setState(() { tab = i; visited.add(i); }),
           destinations: const [
@@ -389,6 +406,7 @@ class _HomeState extends State<Home> {
             NavigationDestination(icon: Icon(Icons.military_tech_outlined), selectedIcon: Icon(Icons.military_tech), label: 'Pase'),
             NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Agentes'),
             NavigationDestination(icon: Icon(Icons.emoji_events_outlined), selectedIcon: Icon(Icons.emoji_events), label: 'Esports'),
+            NavigationDestination(icon: Icon(Icons.account_circle_outlined), selectedIcon: Icon(Icons.account_circle), label: 'Perfil'),
           ],
         ),
       );
@@ -509,7 +527,7 @@ bool okSkin(dynamic s) {
   return !n.contains('aleatorio') && !n.contains('random');
 }
 
-Map tag(dynamic s, dynamic w) => Map<String, dynamic>.from(s)..['_w'] = w['displayIcon'];
+Map tag(dynamic s, dynamic w) => Map<String, dynamic>.from(s)..['_w'] = w['displayIcon']..['_cat'] = w['category'];
 
 String skinImg(Map s) {
   for (final x in (s['chromas'] ?? [])) { if (x['fullRender'] != null) return '${x['fullRender']}'; }
@@ -534,8 +552,7 @@ class SkinGrid extends StatelessWidget {
           itemCount: skins.length,
           itemBuilder: (_, i) {
             final s = skins[i] as Map;
-            final lv = (s['levels'] ?? []) as List;
-            final p = lv.isNotEmpty ? priceOf('${lv[0]['uuid']}') : null;
+            final p = skinPrice(s);
             return GestureDetector(
               onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => SkinPage(s))),
               child: Stack(children: [
@@ -602,14 +619,15 @@ class _SkinPageState extends State<SkinPage> {
   void initState() {
     super.initState();
     final s = widget.s;
+    final cs = (s['chromas'] ?? []) as List;
     styles = [
-      for (final x in (s['chromas'] ?? []))
-        Variant('${x['displayName'] ?? ''}', '${x['fullRender'] ?? x['displayIcon'] ?? skinImg(s)}', '${x['streamedVideo'] ?? ''}', '${x['swatch'] ?? x['fullRender'] ?? ''}', priceOf('${x['uuid']}') ?? ''),
+      for (int i = 0; i < cs.length; i++)
+        Variant('${cs[i]['displayName'] ?? ''}', '${cs[i]['fullRender'] ?? cs[i]['displayIcon'] ?? skinImg(s)}', '${cs[i]['streamedVideo'] ?? ''}', '${cs[i]['swatch'] ?? cs[i]['fullRender'] ?? ''}', i == 0 ? '' : (priceOf('${cs[i]['uuid']}') ?? '≈15 RP')),
     ];
     final ls = (s['levels'] ?? []) as List;
     levels = [
       for (int i = 0; i < ls.length; i++)
-        if (ls[i]['streamedVideo'] != null) Variant('Nivel ${i + 1}', '${ls[i]['displayIcon'] ?? skinImg(s)}', '${ls[i]['streamedVideo']}', '', priceOf('${ls[i]['uuid']}') ?? ''),
+        if (ls[i]['streamedVideo'] != null) Variant('Nivel ${i + 1}', '${ls[i]['displayIcon'] ?? skinImg(s)}', '${ls[i]['streamedVideo']}', '', i == 0 ? '' : (priceOf('${ls[i]['uuid']}') ?? '≈10 RP')),
     ];
     sel = styles.isNotEmpty ? styles.first : (levels.isNotEmpty ? levels.first : Variant('${s['displayName']}', skinImg(s), '', ''));
   }
@@ -644,9 +662,9 @@ class _SkinPageState extends State<SkinPage> {
   Widget title(String t) => Padding(padding: const EdgeInsets.only(top: 22, bottom: 10), child: Text(t, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)));
 
   Widget priceLine() {
-    final p = priceOf(favId);
-    if (p != null) return Row(children: [const Text('Precio: ', style: TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.w700)), Price(p, size: 20)]);
-    return Text(offersLoaded ? 'No se vende suelta en la tienda' : 'Inicia sesión para ver los precios', style: const TextStyle(color: Colors.white54));
+    final p = skinPrice(widget.s);
+    if (p == null) return const SizedBox();
+    return Row(children: [const Text('Precio: ', style: TextStyle(color: Colors.white70, fontSize: 16, fontWeight: FontWeight.w700)), Price(p, size: 20)]);
   }
 
   @override
@@ -673,7 +691,7 @@ class _SkinPageState extends State<SkinPage> {
           if (styles.isNotEmpty) ...[title('Estilos'), row(styles)],
           if (levels.isNotEmpty) ...[title('Animaciones por nivel'), row(levels)],
           if (styles.any((v) => v.price.isNotEmpty) || levels.any((v) => v.price.isNotEmpty))
-            const Padding(padding: EdgeInsets.only(top: 12), child: Text('Los estilos y las mejoras de nivel se pagan con Radianita.', style: TextStyle(color: Colors.white38, fontSize: 12))),
+            const Padding(padding: EdgeInsets.only(top: 12), child: Text('Los estilos y las mejoras de nivel se pagan con Radianita. El símbolo ≈ indica el valor estándar de su gama; el precio exacto se guarda tras iniciar sesión en la tienda.', style: TextStyle(color: Colors.white38, fontSize: 12))),
         ]),
       );
 }
@@ -938,6 +956,54 @@ String? priceOf(String? id) {
   if (c == null || c.isEmpty) return null;
   final e = c.entries.first;
   return '${e.value} ${cur[e.key] ?? ''}';
+}
+
+const vpUuid = '85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741';
+const tierVp = {
+  '12683d76-48d7-84a3-4e09-6985794f0445': 875,
+  '0cebb8be-46d7-c12a-d306-e9907bfc5a25': 1275,
+  '60bca009-4182-7998-dee7-b8a2558dc369': 1775,
+  'e046854e-406c-37f4-6607-19a9ba8426fc': 2175,
+  '411e4a55-4e59-7757-41f0-86a53f101bb5': 2475,
+};
+final teamRe = RegExp(r'vct|champions|esports', caseSensitive: false);
+File get offerFile => File('${Directory.systemTemp.path}/vstore_offers.json');
+
+Future<void> loadOfferCache() async {
+  try {
+    final f = offerFile;
+    if (!await f.exists()) return;
+    final m = jsonDecode(await f.readAsString()) as Map;
+    for (final e in m.entries) {
+      final v = e.value as List;
+      offerCost['${e.key}'] = {'${v[0]}': v[1]};
+    }
+    offersLoaded = offerCost.isNotEmpty;
+  } catch (_) {}
+}
+
+Future<void> saveOfferCache(Map<String, Map> m) async {
+  try {
+    final out = <String, List>{};
+    for (final e in m.entries) {
+      if (e.value.isEmpty) continue;
+      final c = e.value.entries.first;
+      out[e.key] = [c.key, c.value];
+    }
+    await offerFile.writeAsString(jsonEncode(out));
+  } catch (_) {}
+}
+
+bool isTeamSkin(Map s) => teamRe.hasMatch('${s['displayName']}');
+bool isMeleeSkin(Map s) => '${s['_cat'] ?? ''}'.endsWith('Melee');
+
+String? skinPrice(Map s) {
+  final lv = (s['levels'] ?? []) as List;
+  final exact = lv.isNotEmpty ? priceOf('${lv[0]['uuid']}') : null;
+  if (exact != null) return exact;
+  final t = tierVp['${s['contentTierUuid']}'];
+  if (t == null || isTeamSkin(s) || isMeleeSkin(s)) return null;
+  return '≈$t VP';
 }
 
 class CurIcon extends StatelessWidget {
@@ -1450,7 +1516,366 @@ class _EsportsTabState extends State<EsportsTab> {
               padding: EdgeInsets.only(top: 10),
               child: Text("Los Pick'Ems y sus recompensas (títulos, colgantes) solo se pueden jugar y ver dentro del cliente de VALORANT en PC.", style: TextStyle(color: Colors.white54, height: 1.4, fontSize: 13)),
             ),
+            const TeamClassics(),
           ]);
         },
       );
+}
+
+class TeamClassics extends StatefulWidget {
+  const TeamClassics({super.key});
+  @override
+  State<TeamClassics> createState() => _TeamClassicsState();
+}
+
+class _TeamClassicsState extends State<TeamClassics> {
+  late Future<List> f = catalog();
+  String q = '';
+
+  @override
+  Widget build(BuildContext c) => FutureBuilder<List>(
+        future: f,
+        builder: (c, s) {
+          if (s.hasError) return Center(child: TextButton(onPressed: () => setState(() { resetCatalog(); f = catalog(); }), child: const Text('Error al cargar. Reintentar')));
+          if (!s.hasData) return const Padding(padding: EdgeInsets.all(24), child: Center(child: CircularProgressIndicator(color: red)));
+          Map? classic;
+          for (final w in s.data!) { if ('${w['uuid']}' == '29a0cfab-485b-f5d5-779a-b59f85e204a8') classic = w as Map; }
+          final all = <dynamic>[];
+          if (classic != null) {
+            for (final k in classic['skins']) {
+              if (okSkin(k) && teamRe.hasMatch('${k['displayName']}')) all.add(tag(k, classic));
+            }
+            all.sort((a, b) => '${a['displayName']}'.compareTo('${b['displayName']}'));
+          }
+          final found = [for (final k in all) if ('${k['displayName']}'.toLowerCase().contains(q)) k];
+          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Padding(padding: EdgeInsets.only(top: 26, bottom: 6), child: Text('CLASSIC DE EQUIPOS (VCT)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFFE8B923)))),
+            Text('${all.length} skins Classic de equipos y torneos. Pulsa una para ver sus estilos y vídeos.', style: const TextStyle(color: Colors.white60, height: 1.4)),
+            const SizedBox(height: 12),
+            searchField('Buscar equipo (ej. SEN, Fnatic, Liquid...)', (v) => setState(() => q = v.trim().toLowerCase())),
+            const SizedBox(height: 12),
+            if (found.isEmpty) const Padding(padding: EdgeInsets.all(16), child: Text('Sin resultados.', style: TextStyle(color: Colors.white54))) else SkinGrid(found, scroll: false, badge: 'ESPORTS'),
+          ]);
+        },
+      );
+}
+
+// ---------- Perfil: carrera y colección ----------
+const winColor = Color(0xFF2ECC8F);
+Future<List>? _tiers;
+Future<List> tierList() => _tiers ??= api('competitivetiers').then((d) => d as List);
+Future<List>? _mapsF;
+Future<List> mapList() => _mapsF ??= api('maps').then((d) => d as List);
+
+const queueEs = {
+  'competitive': 'Competitivo', 'unrated': 'Sin clasificar', 'swiftplay': 'Juego rápido', 'spikerush': 'Spike Rush',
+  'deathmatch': 'Combate a muerte', 'ggteam': 'Escalada', 'hurm': 'Combate por equipos', 'premier': 'Premier',
+  'snowball': 'Snowball Fight', 'onefa': 'Replicación', 'custom': 'Personalizada',
+};
+
+Future<dynamic> pvp(StoreData d, String path) async {
+  final r = await http.get(Uri.parse('https://pd.${d.shard}.a.pvp.net/$path'), headers: d.hdr);
+  if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
+  return jsonDecode(utf8.decode(r.bodyBytes));
+}
+
+Future<Map> loadProfile(StoreData d) async {
+  final out = <String, dynamic>{};
+  try { out['loadout'] = await pvp(d, 'personalization/v2/players/${d.puuid}/playerloadout'); } catch (_) {}
+  try { out['mmr'] = await pvp(d, 'mmr/v1/players/${d.puuid}'); } catch (_) {}
+  try {
+    final id = out['loadout']?['Identity']?['PlayerCardID'];
+    if (id != null) out['card'] = await api('playercards/$id');
+    final tid = out['loadout']?['Identity']?['PlayerTitleID'];
+    if (tid != null) out['title'] = await api('playertitles/$tid');
+  } catch (_) {}
+  try { out['tiers'] = await tierList(); } catch (_) {}
+  return out;
+}
+
+Future<List> loadMatches(StoreData d) async {
+  final h = await pvp(d, 'match-history/v1/history/${d.puuid}?startIndex=0&endIndex=10');
+  final ids = [for (final m in (h['History'] ?? [])) '${m['MatchID']}'];
+  List agents = [], maps = [];
+  try { agents = await agentList(); } catch (_) {}
+  try { maps = await mapList(); } catch (_) {}
+  final res = await Future.wait([
+    for (final id in ids.take(8))
+      () async {
+        try {
+          final j = await pvp(d, 'match-details/v1/matches/$id');
+          final me = (j['players'] as List).firstWhere((p) => '${p['subject']}' == d.puuid) as Map;
+          Map? mine, other;
+          for (final t in (j['teams'] ?? [])) {
+            if ('${t['teamId']}' == '${me['teamId']}') { mine = t as Map; } else { other = t as Map; }
+          }
+          int result = 2;
+          if (mine != null) {
+            result = mine['won'] == true ? 1 : ((other != null && mine['roundsWon'] == other['roundsWon']) ? 0 : -1);
+          }
+          String agent = '', mapName = '';
+          for (final a in agents) { if ('${a['uuid']}'.toLowerCase() == '${me['characterId']}'.toLowerCase()) agent = '${a['displayIconSmall'] ?? a['displayIcon']}'; }
+          for (final m in maps) { if ('${m['mapUrl']}' == '${j['matchInfo']?['mapId']}') mapName = '${m['displayName']}'; }
+          final st = (me['stats'] ?? {}) as Map;
+          final q = '${j['matchInfo']?['queueID'] ?? ''}';
+          return <String, dynamic>{
+            'agent': agent,
+            'map': mapName,
+            'result': result,
+            'kda': '${st['kills'] ?? 0} / ${st['deaths'] ?? 0} / ${st['assists'] ?? 0}',
+            'score': '${st['score'] ?? 0}',
+            'rounds': (mine != null && other != null) ? '${mine['roundsWon']}-${other['roundsWon']}' : '',
+            'queue': queueEs[q] ?? q,
+          };
+        } catch (_) {
+          return null;
+        }
+      }(),
+  ]);
+  return [for (final r in res) if (r != null) r];
+}
+
+class ProfileTab extends StatefulWidget {
+  final StoreData? data;
+  const ProfileTab(this.data, {super.key});
+  @override
+  State<ProfileTab> createState() => _ProfileTabState();
+}
+
+class _ProfileTabState extends State<ProfileTab> {
+  int sub = 0;
+  StoreData? _d;
+  Future<Map>? pf;
+  Future<List>? mf;
+
+  @override
+  Widget build(BuildContext c) {
+    final d = widget.data;
+    if (!identical(_d, d)) {
+      _d = d;
+      if (d != null && d.hdr != null) {
+        pf = loadProfile(d);
+        mf = loadMatches(d);
+      } else {
+        pf = null;
+        mf = null;
+      }
+    }
+    if (pf == null || d == null) {
+      return const Center(child: Padding(padding: EdgeInsets.all(32), child: Text('Inicia sesión en la pestaña Tienda para ver tu carrera y tu colección.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white60, height: 1.4))));
+    }
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        child: Row(children: [
+          for (final e in {0: 'Carrera', 1: 'Colección'}.entries)
+            Padding(padding: const EdgeInsets.only(right: 8), child: ChoiceChip(label: Text(e.value), selected: sub == e.key, selectedColor: red.withOpacity(.4), onSelected: (_) => setState(() => sub = e.key))),
+        ]),
+      ),
+      Expanded(
+        child: FutureBuilder<Map>(
+          future: pf,
+          builder: (c, s) {
+            if (!s.hasData) return const Center(child: CircularProgressIndicator(color: red));
+            return sub == 0 ? CareerView(d, s.data!, mf!) : CollectionView(s.data!);
+          },
+        ),
+      ),
+    ]);
+  }
+}
+
+class CareerView extends StatelessWidget {
+  final StoreData d;
+  final Map p;
+  final Future<List> matches;
+  const CareerView(this.d, this.p, this.matches, {super.key});
+
+  Widget head(String t) => Padding(padding: const EdgeInsets.only(top: 24, bottom: 10), child: Text(t, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)));
+
+  @override
+  Widget build(BuildContext c) {
+    final card = p['card'], title = p['title'], mmr = p['mmr'];
+    final lvl = p['loadout']?['Identity']?['AccountLevel'];
+    final tiers = (p['tiers'] as List?) ?? [];
+    final cur = tiers.isNotEmpty ? ((tiers.last['tiers'] ?? []) as List) : [];
+    Map? tierOf(int n) {
+      for (final x in cur) { if (x['tier'] == n) return x as Map; }
+      return null;
+    }
+    final lcu = mmr?['LatestCompetitiveUpdate'];
+    final tier = ((lcu?['TierAfterUpdate'] as num?) ?? 0).toInt();
+    final rr = ((lcu?['RankedRatingAfterUpdate'] as num?) ?? 0).toInt();
+    final t = tierOf(tier);
+    final counts = <int, int>{};
+    final seasons = mmr?['QueueSkills']?['competitive']?['SeasonalInfoBySeasonID'];
+    if (seasons is Map) {
+      for (final v in seasons.values) {
+        final n = ((v?['CompetitiveTier'] as num?) ?? 0).toInt();
+        if (n >= 3) counts[n] = (counts[n] ?? 0) + 1;
+      }
+    }
+    final keys = counts.keys.toList()..sort((a, b) => b.compareTo(a));
+    return ListView(padding: const EdgeInsets.all(16), children: [
+      Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6), border: const Border(left: BorderSide(color: red, width: 4))),
+        child: Row(children: [
+          SizedBox(width: 64, height: 64, child: card == null ? const Icon(Icons.person, size: 40) : Image.network('${card['smallArt'] ?? card['displayIcon']}', fit: BoxFit.cover, errorBuilder: (_, __, ___) => const Icon(Icons.person, size: 40))),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(d.name ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+              if (title != null) Text('${title['titleText'] ?? ''}', style: const TextStyle(color: Colors.white60)),
+              if (lvl != null) Text('Nivel de cuenta $lvl', style: const TextStyle(color: sand, fontWeight: FontWeight.w700)),
+            ]),
+          ),
+        ]),
+      ),
+      head('Competitivo'),
+      Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6)),
+        child: Row(children: [
+          SizedBox(width: 72, height: 72, child: tier > 0 && t != null ? Image.network('${t['largeIcon']}', errorBuilder: (_, __, ___) => const Icon(Icons.help_outline, size: 48)) : const Icon(Icons.help_outline, size: 48, color: Colors.white54)),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(tier > 0 && t != null ? '${t['tierName']}' : 'SIN CLASIFICAR', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+              if (tier >= 3) Text('$rr RR', style: const TextStyle(color: sand, fontWeight: FontWeight.w700)),
+              if (tier == 0) const Text('Juega partidas de colocación para ver tu rango.', style: TextStyle(color: Colors.white54, fontSize: 13)),
+            ]),
+          ),
+        ]),
+      ),
+      if (keys.isNotEmpty) ...[
+        head('Rangos alcanzados en actos anteriores'),
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          for (final k in keys)
+            Container(
+              padding: const EdgeInsets.all(8),
+              color: panel,
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (tierOf(k) != null) SizedBox(width: 30, height: 30, child: Image.network('${tierOf(k)!['smallIcon']}', errorBuilder: (_, __, ___) => const SizedBox())),
+                const SizedBox(width: 6),
+                Text('${tierOf(k)?['tierName'] ?? k} ×${counts[k]}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+              ]),
+            ),
+        ]),
+      ],
+      head('Historial de partidas'),
+      FutureBuilder<List>(
+        future: matches,
+        builder: (c, s) {
+          if (s.hasError) return const Text('No se pudo cargar el historial.', style: TextStyle(color: Colors.white54));
+          if (!s.hasData) return const Padding(padding: EdgeInsets.all(20), child: Center(child: CircularProgressIndicator(color: red)));
+          if (s.data!.isEmpty) return const Text('No hay partidas recientes.', style: TextStyle(color: Colors.white54));
+          return Column(children: [
+            for (final m in s.data!)
+              Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6), border: Border(left: BorderSide(color: m['result'] == 1 ? winColor : (m['result'] == -1 ? red : Colors.white38), width: 4))),
+                child: Row(children: [
+                  SizedBox(width: 46, height: 46, child: '${m['agent']}'.isEmpty ? const SizedBox() : Image.network('${m['agent']}', errorBuilder: (_, __, ___) => const SizedBox())),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(m['result'] == 1 ? 'VICTORIA' : (m['result'] == -1 ? 'DERROTA' : (m['result'] == 0 ? 'EMPATE' : 'PARTIDA')), style: TextStyle(fontWeight: FontWeight.w800, color: m['result'] == 1 ? winColor : (m['result'] == -1 ? red : Colors.white70))),
+                      Text('${m['queue']}${'${m['map']}'.isEmpty ? '' : ' · ${m['map']}'}', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                    ]),
+                  ),
+                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Text('${m['rounds']}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                    Text('${m['kda']}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                  ]),
+                ]),
+              ),
+          ]);
+        },
+      ),
+    ]);
+  }
+}
+
+class CollectionView extends StatelessWidget {
+  final Map p;
+  const CollectionView(this.p, {super.key});
+
+  @override
+  Widget build(BuildContext c) {
+    final lo = p['loadout'];
+    if (lo == null) return const Center(child: Padding(padding: EdgeInsets.all(32), child: Text('No se pudo cargar tu colección.', style: TextStyle(color: Colors.white54))));
+    final guns = <String, Map>{};
+    for (final g in (lo['Guns'] ?? [])) { guns['${g['ID']}'.toLowerCase()] = g as Map; }
+    final card = p['card'];
+    return FutureBuilder<List>(
+      future: catalog(),
+      builder: (c, s) {
+        if (!s.hasData) return const Center(child: CircularProgressIndicator(color: red));
+        Widget head(String t) => Padding(padding: const EdgeInsets.only(top: 22, bottom: 10), child: Text(t, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)));
+        return ListView(padding: const EdgeInsets.all(16), children: [
+          if (card != null) ...[
+            head('Tarjeta de jugador'),
+            Center(child: SizedBox(height: 260, child: ClipRRect(borderRadius: BorderRadius.circular(6), child: Image.network('${card['largeArt'] ?? card['displayIcon']}', errorBuilder: (_, __, ___) => const SizedBox())))),
+          ],
+          if ((lo['Sprays'] ?? []).isNotEmpty) ...[
+            head('Expresiones'),
+            Wrap(spacing: 12, runSpacing: 12, children: [
+              for (final sp in (lo['Sprays'] as List))
+                FutureBuilder<dynamic>(
+                  future: api('sprays/${sp['SprayID']}'),
+                  builder: (_, x) => Container(
+                    width: 72,
+                    height: 72,
+                    padding: const EdgeInsets.all(6),
+                    color: panel,
+                    child: x.hasData && x.data['displayIcon'] != null ? Image.network('${x.data['displayIcon']}', errorBuilder: (_, __, ___) => const SizedBox()) : const SizedBox(),
+                  ),
+                ),
+            ]),
+          ],
+          for (final e in catNames.entries) ...[
+            head(e.value),
+            GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: 1.25,
+              children: [
+                for (final w in s.data!)
+                  if ('${w['category']}'.endsWith(e.key))
+                    Builder(builder: (_) {
+                      final g = guns['${w['uuid']}'.toLowerCase()];
+                      Map? skin;
+                      if (g != null) {
+                        for (final k in (w['skins'] ?? [])) { if ('${k['uuid']}'.toLowerCase() == '${g['SkinID']}'.toLowerCase()) skin = tag(k, w); }
+                      }
+                      var img = '${w['displayIcon']}';
+                      if (skin != null) {
+                        img = skinImg(skin);
+                        for (final x in (skin['chromas'] ?? [])) { if ('${x['uuid']}'.toLowerCase() == '${g?['ChromaID']}'.toLowerCase() && x['fullRender'] != null) img = '${x['fullRender']}'; }
+                      }
+                      return GestureDetector(
+                        onTap: skin == null ? null : () => Navigator.push(c, MaterialPageRoute(builder: (_) => SkinPage(skin!))),
+                        child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6)),
+                          child: Column(children: [
+                            Expanded(child: Image.network(img, fit: BoxFit.contain, errorBuilder: (_, __, ___) => const SizedBox())),
+                            const SizedBox(height: 4),
+                            Text(skin != null ? '${skin['displayName']}' : '${w['displayName']}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700, color: sand, fontSize: 12)),
+                          ]),
+                        ),
+                      );
+                    }),
+              ],
+            ),
+          ],
+        ]);
+      },
+    );
+  }
 }
