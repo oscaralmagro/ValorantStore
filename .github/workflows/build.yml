@@ -17,9 +17,13 @@ jobs:
       - name: Generar proyecto Android
         run: |
           flutter create . --platforms=android --project-name vstore --org com.vstore
+          mkdir -p lib assets
+          cp main.dart lib/main.dart
+          cp icon.png assets/icon.png
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's#android:label="[^"]*"#android:label="Tienda Valorant"#' android/app/src/main/AndroidManifest.xml
       - run: flutter pub get
+      - run: dart run flutter_launcher_icons
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
