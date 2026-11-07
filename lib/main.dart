@@ -45,7 +45,7 @@ Future<(List<Skin>, int)> fetchStore(String token) async {
   final puuid = jsonDecode((await http.post(Uri.parse('https://auth.riotgames.com/userinfo'), headers: h)).body)['sub'];
   final ver = jsonDecode((await http.get(Uri.parse('https://valorant-api.com/v1/version'))).body)['data']['riotClientVersion'];
   final plat = base64Encode(utf8.encode(jsonEncode({'platformType': 'PC', 'platformOS': 'Windows', 'platformOSVersion': '10.0.19042.1.256.64bit', 'platformChipset': 'Unknown'})));
-  final sh = {...h, 'X-Riot-Entitlements-JWT': ent, 'X-Riot-ClientVersion': ver, 'X-Riot-ClientPlatform': plat};
+    final Map<String, String> sh = {...h, 'X-Riot-Entitlements-JWT': '$ent', 'X-Riot-ClientVersion': '$ver', 'X-Riot-ClientPlatform': plat};
   final saved = await vault.read(key: 'shard');
   for (final s in {if (saved != null) saved, 'eu', 'na', 'ap', 'kr'}) {
     final r = await http.post(Uri.parse('https://pd.$s.a.pvp.net/store/v3/storefront/$puuid'), headers: sh, body: '{}');
