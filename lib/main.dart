@@ -32,8 +32,9 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   tzdata.initializeTimeZones();
   try {
-    await notif.initialize(const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
+    await notif.initialize(const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher'), iOS: DarwinInitializationSettings()));
     await notif.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.requestNotificationsPermission();
+    await notif.resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()?.requestPermissions(alert: true, badge: true, sound: true);
   } catch (_) {}
   await loadFavs();
   await loadOfferCache();
@@ -555,7 +556,7 @@ class SkinGrid extends StatelessWidget {
             final p = skinPrice(s);
             return GestureDetector(
               onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => SkinPage(s))),
-              child: Stack(children: [
+              child: Stack(fit: StackFit.expand, children: [
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6)),
@@ -811,7 +812,7 @@ class _LoginPageState extends State<LoginPage> {
 
 // ---------- Armario, catálogo y notificaciones ----------
 final notif = FlutterLocalNotificationsPlugin();
-const notifDetails = NotificationDetails(android: AndroidNotificationDetails('store', 'Tienda', importance: Importance.high, priority: Priority.high));
+const notifDetails = NotificationDetails(android: AndroidNotificationDetails('store', 'Tienda', importance: Importance.high, priority: Priority.high), iOS: DarwinNotificationDetails());
 final favs = <String, Map<String, dynamic>>{};
 final favTick = ValueNotifier<int>(0);
 
@@ -1288,7 +1289,7 @@ class _AgentsTabState extends State<AgentsTab> {
                           child: Container(
                             padding: const EdgeInsets.all(6),
                             decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6)),
-                            child: Stack(children: [
+                            child: Stack(fit: StackFit.expand, children: [
                               Column(children: [
                                 Expanded(child: Image.network('${a['displayIcon']}', fit: BoxFit.contain, errorBuilder: (_, __, ___) => const SizedBox())),
                                 const SizedBox(height: 4),
@@ -1825,16 +1826,25 @@ class _CareerViewState extends State<CareerView> {
       return '${par != null ? '${par['displayName']} // ' : ''}${s['displayName']}'.toUpperCase();
     }
     final seasonsInfo = mmr?['QueueSkills']?['competitive']?['SeasonalInfoBySeasonID'];
-    final acts = <String>[];
+    final acts = <String>{};
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    for (final e in defs.entries) {
+      final sd = e.value;
+      if (sd['parentUuid'] != null && '${sd['displayName'] ?? ''}'.isNotEmpty && '${sd['startTime'] ?? ''}'.compareTo(nowIso) <= 0) acts.add(e.key);
+    }
     if (seasonsInfo is Map) {
       for (final e in seasonsInfo.entries) {
         final v = e.value;
-        if (v is Map && (((v['NumberOfGames'] as num?) ?? 0) > 0)) acts.add('${e.key}');
+        if (v is Map && (((v['NumberOfGames'] as num?) ?? 0) > 0)) acts.add('${e.key}'.toLowerCase());
       }
     }
-    acts.sort((a, b) => '${defs[b.toLowerCase()]?['startTime'] ?? ''}'.compareTo('${defs[a.toLowerCase()]?['startTime'] ?? ''}'));
-    final selId = (sel != null && acts.contains(sel)) ? sel : (acts.isNotEmpty ? acts.first : null);
-    final Map? info = selId != null ? seasonsInfo[selId] as Map? : null;
+    final actList = acts.toList();
+    actList.sort((a, b) => '${defs[b.toLowerCase()]?['startTime'] ?? ''}'.compareTo('${defs[a.toLowerCase()]?['startTime'] ?? ''}'));
+    final selId = (sel != null && actList.contains(sel)) ? sel : (actList.isNotEmpty ? actList.first : null);
+    Map? info;
+    if (selId != null && seasonsInfo is Map) {
+      for (final e in seasonsInfo.entries) { if ('${e.key}'.toLowerCase() == selId && e.value is Map) info = e.value as Map; }
+    }
     final actTier = ((info?['CompetitiveTier'] as num?) ?? 0).toInt();
     final actT = tierOf(actTier);
 
@@ -1871,8 +1881,8 @@ class _CareerViewState extends State<CareerView> {
         ]),
       ),
       head('Rango por acto'),
-      if (acts.isEmpty)
-        const Text('Aún no tienes actos con partidas competitivas.', style: TextStyle(color: Colors.white54))
+      if (actList.isEmpty)
+        const Text('No se pudo cargar la lista de actos.', style: TextStyle(color: Colors.white54))
       else ...[
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1882,7 +1892,7 @@ class _CareerViewState extends State<CareerView> {
               isExpanded: true,
               dropdownColor: panel,
               value: selId,
-              items: [for (final a in acts) DropdownMenuItem<String>(value: a, child: Text(label(a), style: const TextStyle(fontWeight: FontWeight.w700)))],
+              items: [for (final a in actList) DropdownMenuItem<String>(value: a, child: Text(label(a), style: const TextStyle(fontWeight: FontWeight.w700)))],
               onChanged: (v) => setState(() => sel = v),
             ),
           ),
@@ -1896,8 +1906,8 @@ class _CareerViewState extends State<CareerView> {
             const SizedBox(width: 14),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(actTier > 0 && actT != null ? '${actT['tierName']}' : 'SIN CLASIFICAR', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
-                Text('Victorias: ${info?['NumberOfWins'] ?? 0} · Partidas: ${info?['NumberOfGames'] ?? 0}', style: const TextStyle(color: Colors.white60, fontSize: 13)),
+                Text(actTier > 0 && actT != null ? '${actT['tierName']}' : (((info?['NumberOfGames'] as num?) ?? 0) == 0 ? 'SIN JUGAR' : 'SIN CLASIFICAR'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+                Text(((info?['NumberOfGames'] as num?) ?? 0) == 0 ? 'Sin partidas en este acto' : 'Victorias: ${info?['NumberOfWins'] ?? 0} · Partidas: ${info?['NumberOfGames'] ?? 0}', style: const TextStyle(color: Colors.white60, fontSize: 13)),
               ]),
             ),
           ]),
