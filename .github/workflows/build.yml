@@ -18,10 +18,14 @@ jobs:
         run: |
           flutter create . --platforms=android --project-name vstore --org com.vstore
           mkdir -p lib assets
-           if [ -f main.dart ]; then cp main.dart lib/main.dart; else echo "AVISO: main.dart no esta en la raiz"; fi
+          if [ -f main.dart ]; then cp main.dart lib/main.dart; fi
           cp icon.png assets/icon.png
-          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          cp icon_fg.png assets/icon_fg.png
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#</application>#<receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver"/><receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/><action android:name="android.intent.action.MY_PACKAGE_REPLACED"/></intent-filter></receiver></application>#' android/app/src/main/AndroidManifest.xml
           sed -i 's#android:label="[^"]*"#android:label="Tienda Valorant"#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#compileOptions {#compileOptions {\n        isCoreLibraryDesugaringEnabled = true#' android/app/build.gradle.kts
+          printf '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> android/app/build.gradle.kts
       - run: flutter pub get
       - run: dart run flutter_launcher_icons
       - run: flutter build apk --release
