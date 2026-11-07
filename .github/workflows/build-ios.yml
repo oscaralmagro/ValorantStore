@@ -1,0 +1,36 @@
+name: Build iOS
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: { channel: stable }
+      - name: Generar proyecto iOS
+        run: |
+          flutter create . --platforms=ios --project-name vstore --org com.vstore
+          mkdir -p lib assets
+          if [ -f main.dart ]; then cp main.dart lib/main.dart; fi
+          cp icon.png assets/icon.png
+          cp icon_fg.png assets/icon_fg.png
+          sed -i '' 's/ios: false/ios: true\n  remove_alpha_ios: true/' pubspec.yaml
+          sed -i '' 's#^import Flutter#import Flutter\nimport UserNotifications#' ios/Runner/AppDelegate.swift
+          sed -i '' 's#\( *\)return super.application(application, didFinishLaunchingWithOptions: launchOptions)#\1UNUserNotificationCenter.current().delegate = self\n\1return super.application(application, didFinishLaunchingWithOptions: launchOptions)#' ios/Runner/AppDelegate.swift
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'Valorant Store'" ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'Valorant Store'" ios/Runner/Info.plist
+      - run: flutter pub get
+      - run: dart run flutter_launcher_icons
+      - run: flutter build ios --release --no-codesign
+      - name: Crear IPA sin firmar
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qr ValorantStore.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: valorant-store-ipa
+          path: ValorantStore.ipa
