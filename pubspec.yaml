@@ -1,7 +1,7 @@
 name: vstore
 description: Tienda diaria de Valorant.
 publish_to: none
-version: 1.1.0+2
+version: 1.2.0+3
 environment:
   sdk: ">=3.3.0 <4.0.0"
 dependencies:
@@ -12,6 +12,8 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   url_launcher: ^6.3.0
   video_player: ^2.9.0
+  flutter_local_notifications: ^19.0.0
+  timezone: ^0.10.0
 dev_dependencies:
   flutter_launcher_icons: ^0.14.1
 flutter:
@@ -22,3 +24,5 @@ flutter_launcher_icons:
   android: true
   ios: false
   image_path: assets/icon.png
+  adaptive_icon_background: "#0F1923"
+  adaptive_icon_foreground: assets/icon_fg.png
