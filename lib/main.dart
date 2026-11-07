@@ -1386,13 +1386,34 @@ Future<List> eventList() async {
 }
 
 Future<List> esportsSchedule() async {
-  try {
-    final r = await http.get(Uri.parse('https://esports-api.service.valorantesports.com/persisted/val/getSchedule?hl=en-US'), headers: {'x-api-key': esportsKey});
-    final j = jsonDecode(utf8.decode(r.bodyBytes));
-    return (j['data']?['schedule']?['events'] ?? []) as List;
-  } catch (_) {
-    return [];
+  final all = <dynamic>[];
+  Future<Map?> page([String? tok]) async {
+    try {
+      final r = await http.get(Uri.parse('https://esports-api.service.valorantesports.com/persisted/val/getSchedule?hl=en-US${tok != null ? '&pageToken=$tok' : ''}'), headers: {'x-api-key': esportsKey});
+      final j = jsonDecode(utf8.decode(r.bodyBytes));
+      return j['data']?['schedule'] as Map?;
+    } catch (_) {
+      return null;
+    }
   }
+  final first = await page();
+  if (first == null) return all;
+  all.addAll((first['events'] ?? []) as List);
+  String? newer = first['pages']?['newer'] as String?;
+  for (int i = 0; i < 3 && newer != null; i++) {
+    final p = await page(newer);
+    if (p == null) break;
+    all.addAll((p['events'] ?? []) as List);
+    newer = p['pages']?['newer'] as String?;
+  }
+  String? older = first['pages']?['older'] as String?;
+  for (int i = 0; i < 3 && older != null; i++) {
+    final p = await page(older);
+    if (p == null) break;
+    all.addAll((p['events'] ?? []) as List);
+    older = p['pages']?['older'] as String?;
+  }
+  return all;
 }
 
 class EsportsTab extends StatefulWidget {
@@ -1454,9 +1475,13 @@ class _EsportsTabState extends State<EsportsTab> {
           ]..sort((x, y) => '${x['startTime']}'.compareTo('${y['startTime']}'));
           final next = sched.take(10).toList();
           final teams = <String, Map>{};
-          for (final e in sched) {
-            for (final t in (e['match']['teams'] ?? [])) { if (t is Map && t['code'] != null) teams['${t['code']}'] = t; }
+          for (final e in s.data![1]) {
+            if (e is! Map || e['match'] == null) continue;
+            for (final t in (e['match']['teams'] ?? [])) {
+              if (t is Map && t['code'] != null && '${t['code']}'.toUpperCase() != 'TBD') teams['${t['code']}'] = t;
+            }
           }
+          final teamList = teams.values.toList()..sort((a, b) => '${a['code']}'.compareTo('${b['code']}'));
           return ListView(padding: const EdgeInsets.all(16), children: [
             const Text('Esports', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
             for (final e in live) eventCard(e, true),
@@ -1498,7 +1523,7 @@ class _EsportsTabState extends State<EsportsTab> {
             if (teams.isNotEmpty) ...[
               head('EQUIPOS'),
               Wrap(spacing: 10, runSpacing: 10, children: [
-                for (final t in teams.values)
+                for (final t in teamList)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     color: panel,
@@ -1548,13 +1573,24 @@ class _TeamClassicsState extends State<TeamClassics> {
             all.sort((a, b) => '${a['displayName']}'.compareTo('${b['displayName']}'));
           }
           final found = [for (final k in all) if ('${k['displayName']}'.toLowerCase().contains(q)) k];
+          final yr = 'VCT${DateTime.now().year % 100}';
+          final thisYear = [for (final k in found) if ('${k['displayName']}'.toUpperCase().contains(yr)) k];
+          final older = [for (final k in found) if (!'${k['displayName']}'.toUpperCase().contains(yr)) k];
           return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Padding(padding: EdgeInsets.only(top: 26, bottom: 6), child: Text('CLASSIC DE EQUIPOS (VCT)', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFFE8B923)))),
             Text('${all.length} skins Classic de equipos y torneos. Pulsa una para ver sus estilos y vídeos.', style: const TextStyle(color: Colors.white60, height: 1.4)),
             const SizedBox(height: 12),
             searchField('Buscar equipo (ej. SEN, Fnatic, Liquid...)', (v) => setState(() => q = v.trim().toLowerCase())),
             const SizedBox(height: 12),
-            if (found.isEmpty) const Padding(padding: EdgeInsets.all(16), child: Text('Sin resultados.', style: TextStyle(color: Colors.white54))) else SkinGrid(found, scroll: false, badge: 'ESPORTS'),
+            if (found.isEmpty) const Padding(padding: EdgeInsets.all(16), child: Text('Sin resultados.', style: TextStyle(color: Colors.white54))),
+            if (thisYear.isNotEmpty) ...[
+              Padding(padding: const EdgeInsets.only(top: 18, bottom: 10), child: Text('CLASSIC DE ESTE AÑO ($yr)', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
+              SkinGrid(thisYear, scroll: false, badge: 'ESPORTS'),
+            ],
+            if (older.isNotEmpty) ...[
+              const Padding(padding: EdgeInsets.only(top: 22, bottom: 10), child: Text('CLASSIC DE AÑOS ANTERIORES', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
+              SkinGrid(older, scroll: false, badge: 'ESPORTS'),
+            ],
           ]);
         },
       );
@@ -1579,9 +1615,31 @@ Future<dynamic> pvp(StoreData d, String path) async {
   return jsonDecode(utf8.decode(r.bodyBytes));
 }
 
+Future<List>? _seasonsF;
+Future<List> seasonList() => _seasonsF ??= api('seasons').then((d) => d as List);
+
+Future<dynamic> exprInfo(String id) async {
+  for (final k in ['sprays', 'flex']) {
+    try {
+      final r = await api('$k/$id');
+      if (r is Map) return r;
+    } catch (_) {}
+  }
+  return null;
+}
+
 Future<Map> loadProfile(StoreData d) async {
   final out = <String, dynamic>{};
-  try { out['loadout'] = await pvp(d, 'personalization/v2/players/${d.puuid}/playerloadout'); } catch (_) {}
+  String? err;
+  for (final v in ['v3', 'v2']) {
+    try {
+      out['loadout'] = await pvp(d, 'personalization/$v/players/${d.puuid}/playerloadout');
+      break;
+    } catch (e) {
+      err = '$v: $e';
+    }
+  }
+  if (out['loadout'] == null) out['loErr'] = err;
   try { out['mmr'] = await pvp(d, 'mmr/v1/players/${d.puuid}'); } catch (_) {}
   try {
     final id = out['loadout']?['Identity']?['PlayerCardID'];
@@ -1590,6 +1648,7 @@ Future<Map> loadProfile(StoreData d) async {
     if (tid != null) out['title'] = await api('playertitles/$tid');
   } catch (_) {}
   try { out['tiers'] = await tierList(); } catch (_) {}
+  try { out['seasons'] = await seasonList(); } catch (_) {}
   return out;
 }
 
@@ -1626,6 +1685,9 @@ Future<List> loadMatches(StoreData d) async {
             'score': '${st['score'] ?? 0}',
             'rounds': (mine != null && other != null) ? '${mine['roundsWon']}-${other['roundsWon']}' : '',
             'queue': queueEs[q] ?? q,
+            'raw': j,
+            'me': d.puuid,
+            'meTeam': '${me['teamId']}',
           };
         } catch (_) {
           return null;
@@ -1685,37 +1747,58 @@ class _ProfileTabState extends State<ProfileTab> {
   }
 }
 
-class CareerView extends StatelessWidget {
+class CareerView extends StatefulWidget {
   final StoreData d;
   final Map p;
   final Future<List> matches;
   const CareerView(this.d, this.p, this.matches, {super.key});
+  @override
+  State<CareerView> createState() => _CareerViewState();
+}
+
+class _CareerViewState extends State<CareerView> {
+  String? sel;
 
   Widget head(String t) => Padding(padding: const EdgeInsets.only(top: 24, bottom: 10), child: Text(t, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)));
 
   @override
   Widget build(BuildContext c) {
+    final p = widget.p, d = widget.d;
     final card = p['card'], title = p['title'], mmr = p['mmr'];
     final lvl = p['loadout']?['Identity']?['AccountLevel'];
     final tiers = (p['tiers'] as List?) ?? [];
-    final cur = tiers.isNotEmpty ? ((tiers.last['tiers'] ?? []) as List) : [];
+    final tierTable = tiers.isNotEmpty ? ((tiers.last['tiers'] ?? []) as List) : [];
     Map? tierOf(int n) {
-      for (final x in cur) { if (x['tier'] == n) return x as Map; }
+      for (final x in tierTable) { if (x['tier'] == n) return x as Map; }
       return null;
     }
     final lcu = mmr?['LatestCompetitiveUpdate'];
     final tier = ((lcu?['TierAfterUpdate'] as num?) ?? 0).toInt();
     final rr = ((lcu?['RankedRatingAfterUpdate'] as num?) ?? 0).toInt();
     final t = tierOf(tier);
-    final counts = <int, int>{};
-    final seasons = mmr?['QueueSkills']?['competitive']?['SeasonalInfoBySeasonID'];
-    if (seasons is Map) {
-      for (final v in seasons.values) {
-        final n = ((v?['CompetitiveTier'] as num?) ?? 0).toInt();
-        if (n >= 3) counts[n] = (counts[n] ?? 0) + 1;
+
+    final defs = <String, Map>{};
+    for (final s in ((p['seasons'] as List?) ?? [])) { defs['${s['uuid']}'.toLowerCase()] = s as Map; }
+    String label(String id) {
+      final s = defs[id.toLowerCase()];
+      if (s == null) return id.substring(0, 8).toUpperCase();
+      final par = defs['${s['parentUuid']}'.toLowerCase()];
+      return '${par != null ? '${par['displayName']} // ' : ''}${s['displayName']}'.toUpperCase();
+    }
+    final seasonsInfo = mmr?['QueueSkills']?['competitive']?['SeasonalInfoBySeasonID'];
+    final acts = <String>[];
+    if (seasonsInfo is Map) {
+      for (final e in seasonsInfo.entries) {
+        final v = e.value;
+        if (v is Map && (((v['NumberOfGames'] as num?) ?? 0) > 0)) acts.add('${e.key}');
       }
     }
-    final keys = counts.keys.toList()..sort((a, b) => b.compareTo(a));
+    acts.sort((a, b) => '${defs[b.toLowerCase()]?['startTime'] ?? ''}'.compareTo('${defs[a.toLowerCase()]?['startTime'] ?? ''}'));
+    final selId = (sel != null && acts.contains(sel)) ? sel : (acts.isNotEmpty ? acts.first : null);
+    final Map? info = selId != null ? seasonsInfo[selId] as Map? : null;
+    final actTier = ((info?['CompetitiveTier'] as num?) ?? 0).toInt();
+    final actT = tierOf(actTier);
+
     return ListView(padding: const EdgeInsets.all(16), children: [
       Container(
         padding: const EdgeInsets.all(14),
@@ -1748,53 +1831,189 @@ class CareerView extends StatelessWidget {
           ),
         ]),
       ),
-      if (keys.isNotEmpty) ...[
-        head('Rangos alcanzados en actos anteriores'),
-        Wrap(spacing: 10, runSpacing: 10, children: [
-          for (final k in keys)
-            Container(
-              padding: const EdgeInsets.all(8),
-              color: panel,
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                if (tierOf(k) != null) SizedBox(width: 30, height: 30, child: Image.network('${tierOf(k)!['smallIcon']}', errorBuilder: (_, __, ___) => const SizedBox())),
-                const SizedBox(width: 6),
-                Text('${tierOf(k)?['tierName'] ?? k} ×${counts[k]}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+      head('Rango por acto'),
+      if (acts.isEmpty)
+        const Text('Aún no tienes actos con partidas competitivas.', style: TextStyle(color: Colors.white54))
+      else ...[
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          color: panel,
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              isExpanded: true,
+              dropdownColor: panel,
+              value: selId,
+              items: [for (final a in acts) DropdownMenuItem<String>(value: a, child: Text(label(a), style: const TextStyle(fontWeight: FontWeight.w700)))],
+              onChanged: (v) => setState(() => sel = v),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6)),
+          child: Row(children: [
+            SizedBox(width: 64, height: 64, child: actTier > 0 && actT != null ? Image.network('${actT['largeIcon']}', errorBuilder: (_, __, ___) => const Icon(Icons.help_outline, size: 44)) : const Icon(Icons.help_outline, size: 44, color: Colors.white54)),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(actTier > 0 && actT != null ? '${actT['tierName']}' : 'SIN CLASIFICAR', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+                Text('Victorias: ${info?['NumberOfWins'] ?? 0} · Partidas: ${info?['NumberOfGames'] ?? 0}', style: const TextStyle(color: Colors.white60, fontSize: 13)),
               ]),
             ),
-        ]),
+          ]),
+        ),
       ],
       head('Historial de partidas'),
       FutureBuilder<List>(
-        future: matches,
+        future: widget.matches,
         builder: (c, s) {
           if (s.hasError) return const Text('No se pudo cargar el historial.', style: TextStyle(color: Colors.white54));
           if (!s.hasData) return const Padding(padding: EdgeInsets.all(20), child: Center(child: CircularProgressIndicator(color: red)));
           if (s.data!.isEmpty) return const Text('No hay partidas recientes.', style: TextStyle(color: Colors.white54));
           return Column(children: [
             for (final m in s.data!)
-              Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6), border: Border(left: BorderSide(color: m['result'] == 1 ? winColor : (m['result'] == -1 ? red : Colors.white38), width: 4))),
-                child: Row(children: [
-                  SizedBox(width: 46, height: 46, child: '${m['agent']}'.isEmpty ? const SizedBox() : Image.network('${m['agent']}', errorBuilder: (_, __, ___) => const SizedBox())),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(m['result'] == 1 ? 'VICTORIA' : (m['result'] == -1 ? 'DERROTA' : (m['result'] == 0 ? 'EMPATE' : 'PARTIDA')), style: TextStyle(fontWeight: FontWeight.w800, color: m['result'] == 1 ? winColor : (m['result'] == -1 ? red : Colors.white70))),
-                      Text('${m['queue']}${'${m['map']}'.isEmpty ? '' : ' · ${m['map']}'}', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+              GestureDetector(
+                onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => MatchPage(m as Map, tierTable))),
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6), border: Border(left: BorderSide(color: m['result'] == 1 ? winColor : (m['result'] == -1 ? red : Colors.white38), width: 4))),
+                  child: Row(children: [
+                    SizedBox(width: 46, height: 46, child: '${m['agent']}'.isEmpty ? const SizedBox() : Image.network('${m['agent']}', errorBuilder: (_, __, ___) => const SizedBox())),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(m['result'] == 1 ? 'VICTORIA' : (m['result'] == -1 ? 'DERROTA' : (m['result'] == 0 ? 'EMPATE' : 'PARTIDA')), style: TextStyle(fontWeight: FontWeight.w800, color: m['result'] == 1 ? winColor : (m['result'] == -1 ? red : Colors.white70))),
+                        Text('${m['queue']}${'${m['map']}'.isEmpty ? '' : ' · ${m['map']}'}', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                      ]),
+                    ),
+                    Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                      Text('${m['rounds']}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+                      Text('${m['kda']}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
                     ]),
-                  ),
-                  Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                    Text('${m['rounds']}', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-                    Text('${m['kda']}', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+                    const Icon(Icons.chevron_right, color: Colors.white38),
                   ]),
-                ]),
+                ),
               ),
           ]);
         },
       ),
     ]);
+  }
+}
+
+class MatchPage extends StatelessWidget {
+  final Map m;
+  final List tiers;
+  const MatchPage(this.m, this.tiers, {super.key});
+
+  Map? tierOf(int n) {
+    for (final x in tiers) { if (x['tier'] == n) return x as Map; }
+    return null;
+  }
+
+  String teamLabel(String id) => id == 'Red' ? 'EQUIPO ROJO' : (id == 'Blue' ? 'EQUIPO AZUL' : id.toUpperCase());
+
+  @override
+  Widget build(BuildContext c) {
+    final raw = m['raw'] as Map;
+    final info = (raw['matchInfo'] ?? {}) as Map;
+    final players = [for (final x in (raw['players'] ?? [])) x as Map];
+    final teams = {for (final t in (raw['teams'] ?? [])) '${t['teamId']}': t as Map};
+    final myTeam = '${m['meTeam']}';
+    final ids = <String>[];
+    for (final x in players) { if (!ids.contains('${x['teamId']}')) ids.add('${x['teamId']}'); }
+    final twoTeams = ids.length == 2;
+    if (twoTeams) { ids.sort((a, b) => a == myTeam ? -1 : (b == myTeam ? 1 : 0)); }
+    final start = DateTime.fromMillisecondsSinceEpoch((((info['gameStartMillis'] as num?) ?? 0)).toInt()).toLocal();
+    final res = m['result'];
+    final col = res == 1 ? winColor : (res == -1 ? red : Colors.white70);
+
+    Widget cell(String s, double w, {bool bold = false, Color? color}) => SizedBox(width: w, child: Text(s, textAlign: TextAlign.center, style: TextStyle(fontWeight: bold ? FontWeight.w800 : FontWeight.w600, fontSize: 13, color: color ?? sand)));
+
+    Widget block(String title, List<Map> list, Map? team, Map<String, String> icons) {
+      list.sort((a, b) => (((b['stats']?['score'] as num?) ?? 0)).compareTo(((a['stats']?['score'] as num?) ?? 0)));
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 18, bottom: 8),
+          child: Row(children: [
+            Expanded(child: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800))),
+            if (team != null) Text('${team['roundsWon'] ?? ''}', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: team['won'] == true ? winColor : Colors.white70)),
+          ]),
+        ),
+        Row(children: [
+          const SizedBox(width: 44),
+          const Expanded(child: Text('JUGADOR', style: TextStyle(color: Colors.white38, fontSize: 11))),
+          cell('ACS', 44, color: Colors.white38),
+          cell('K', 30, color: Colors.white38),
+          cell('D', 30, color: Colors.white38),
+          cell('A', 30, color: Colors.white38),
+        ]),
+        const SizedBox(height: 4),
+        for (final x in list)
+          Builder(builder: (_) {
+            final st = (x['stats'] ?? {}) as Map;
+            final rounds = (((st['roundsPlayed'] as num?) ?? (team?['roundsPlayed'] as num?) ?? 0)).toInt();
+            final score = (((st['score'] as num?) ?? 0)).toInt();
+            final acs = rounds > 0 ? score ~/ rounds : score;
+            final mine = '${x['subject']}' == '${m['me']}';
+            final name = '${x['gameName'] ?? ''}'.isEmpty ? 'Jugador oculto' : '${x['gameName']}#${x['tagLine'] ?? ''}';
+            final tr = tierOf((((x['competitiveTier'] as num?) ?? 0)).toInt());
+            final icon = icons['${x['characterId']}'.toLowerCase()] ?? '';
+            return Container(
+              margin: const EdgeInsets.only(bottom: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+              color: mine ? red.withOpacity(.25) : panel,
+              child: Row(children: [
+                SizedBox(width: 36, height: 36, child: icon.isEmpty ? const SizedBox() : Image.network(icon, errorBuilder: (_, __, ___) => const SizedBox())),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Row(children: [
+                    Flexible(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: mine ? FontWeight.w800 : FontWeight.w600, fontSize: 13))),
+                    if (tr != null && (((x['competitiveTier'] as num?) ?? 0)) > 0) Padding(padding: const EdgeInsets.only(left: 6), child: SizedBox(width: 20, height: 20, child: Image.network('${tr['smallIcon']}', errorBuilder: (_, __, ___) => const SizedBox()))),
+                  ]),
+                ),
+                cell('$acs', 44, bold: true),
+                cell('${st['kills'] ?? 0}', 30),
+                cell('${st['deaths'] ?? 0}', 30),
+                cell('${st['assists'] ?? 0}', 30),
+              ]),
+            );
+          }),
+      ]);
+    }
+
+    return Scaffold(
+      appBar: AppBar(backgroundColor: bg, title: Text('${m['map']}'.isEmpty ? 'Partida' : '${m['map']}', style: const TextStyle(fontWeight: FontWeight.w800))),
+      body: FutureBuilder<List>(
+        future: agentList().catchError((_) => <dynamic>[]),
+        builder: (c, s) {
+          final icons = <String, String>{};
+          for (final a in (s.data ?? [])) { icons['${a['uuid']}'.toLowerCase()] = '${a['displayIconSmall'] ?? a['displayIcon']}'; }
+          return ListView(padding: const EdgeInsets.all(16), children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(6), border: Border(left: BorderSide(color: col, width: 4))),
+              child: Row(children: [
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(res == 1 ? 'VICTORIA' : (res == -1 ? 'DERROTA' : (res == 0 ? 'EMPATE' : 'PARTIDA')), style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: col)),
+                    Text('${m['queue']} · ${dayStr(start)} ${hourStr(start)}', style: const TextStyle(color: Colors.white60)),
+                  ]),
+                ),
+                Text('${m['rounds']}', style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w900)),
+              ]),
+            ),
+            if (twoTeams)
+              for (final id in ids)
+                block(id == myTeam ? 'TU EQUIPO · ${teamLabel(id)}' : teamLabel(id), [for (final x in players) if ('${x['teamId']}' == id) x], teams[id], icons)
+            else
+              block('JUGADORES', [...players], null, icons),
+          ]);
+        },
+      ),
+    );
   }
 }
 
@@ -1805,10 +2024,14 @@ class CollectionView extends StatelessWidget {
   @override
   Widget build(BuildContext c) {
     final lo = p['loadout'];
-    if (lo == null) return const Center(child: Padding(padding: EdgeInsets.all(32), child: Text('No se pudo cargar tu colección.', style: TextStyle(color: Colors.white54))));
+    if (lo == null) return Center(child: Padding(padding: const EdgeInsets.all(32), child: Text('No se pudo cargar tu colección (${p['loErr'] ?? 'sin respuesta'}).', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white54))));
     final guns = <String, Map>{};
     for (final g in (lo['Guns'] ?? [])) { guns['${g['ID']}'.toLowerCase()] = g as Map; }
     final card = p['card'];
+    final exprIds = <String>[
+      for (final x in (lo['ActiveExpressions'] ?? [])) '${x['AssetID']}',
+      for (final x in (lo['Sprays'] ?? [])) '${x['SprayID']}',
+    ];
     return FutureBuilder<List>(
       future: catalog(),
       builder: (c, s) {
@@ -1819,18 +2042,18 @@ class CollectionView extends StatelessWidget {
             head('Tarjeta de jugador'),
             Center(child: SizedBox(height: 260, child: ClipRRect(borderRadius: BorderRadius.circular(6), child: Image.network('${card['largeArt'] ?? card['displayIcon']}', errorBuilder: (_, __, ___) => const SizedBox())))),
           ],
-          if ((lo['Sprays'] ?? []).isNotEmpty) ...[
+          if (exprIds.isNotEmpty) ...[
             head('Expresiones'),
             Wrap(spacing: 12, runSpacing: 12, children: [
-              for (final sp in (lo['Sprays'] as List))
+              for (final id in exprIds)
                 FutureBuilder<dynamic>(
-                  future: api('sprays/${sp['SprayID']}'),
+                  future: exprInfo(id),
                   builder: (_, x) => Container(
                     width: 72,
                     height: 72,
                     padding: const EdgeInsets.all(6),
                     color: panel,
-                    child: x.hasData && x.data['displayIcon'] != null ? Image.network('${x.data['displayIcon']}', errorBuilder: (_, __, ___) => const SizedBox()) : const SizedBox(),
+                    child: x.hasData && x.data is Map && x.data['displayIcon'] != null ? Image.network('${x.data['displayIcon']}', errorBuilder: (_, __, ___) => const SizedBox()) : const SizedBox(),
                   ),
                 ),
             ]),
