@@ -141,7 +141,7 @@ Future<StoreData> fetchStore(String token) async {
     } catch (_) {}
     try {
       final x = await http.get(Uri.parse('https://pd.$s.a.pvp.net/account-xp/v1/players/$puuid'), headers: sh);
-      out.level = (jsonDecode(x.body)['Progress']?['Level'] ?? 0) as int;
+      out.level = ((jsonDecode(x.body)['Progress']?['Level'] ?? 0) as num).toInt();
     } catch (_) {}
     try {
       final x = await http.get(Uri.parse('https://pd.$s.a.pvp.net/contracts/v1/contracts/$puuid'), headers: sh);
@@ -1346,7 +1346,7 @@ class AgentPage extends StatelessWidget {
             ),
         ]),
         const SizedBox(height: 10),
-        Text('${a['description'] ?? ''}', style: const TextStyle(color: Colors.white70, height: 1.4)),
+        Text(cleanTags(a['description']), style: const TextStyle(color: Colors.white70, height: 1.4)),
         const Padding(padding: EdgeInsets.only(top: 22, bottom: 10), child: Text('Habilidades', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800))),
         for (final ab in (a['abilities'] ?? []))
           if (ab['displayName'] != null && '${ab['displayName']}'.isNotEmpty)
@@ -1361,7 +1361,7 @@ class AgentPage extends StatelessWidget {
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text('${ab['displayName']}', style: const TextStyle(fontWeight: FontWeight.w800, color: sand)),
                     const SizedBox(height: 4),
-                    Text('${ab['description']}', style: const TextStyle(color: Colors.white60, fontSize: 13, height: 1.35)),
+                    Text(cleanTags(ab['description']), style: const TextStyle(color: Colors.white60, fontSize: 13, height: 1.35)),
                   ]),
                 ),
               ]),
@@ -1609,6 +1609,38 @@ const queueEs = {
   'snowball': 'Snowball Fight', 'onefa': 'Replicación', 'custom': 'Personalizada',
 };
 
+String cleanTags(dynamic t) => '${t ?? ''}'.replaceAll(RegExp(r'<[^>]*>'), '').replaceAll(RegExp(r'[ \t]{2,}'), ' ').trim();
+
+final nameCache = <String, String>{};
+
+Future<void> fillNames(StoreData d, List players) async {
+  final need = <String>{};
+  for (final x in players) {
+    final id = '${x['subject']}';
+    if (!nameCache.containsKey(id)) need.add(id);
+  }
+  if (need.isNotEmpty) {
+    try {
+      final r = await http.put(Uri.parse('https://pd.${d.shard}.a.pvp.net/name-service/v2/players'),
+          headers: {...?d.hdr, 'Content-Type': 'application/json'}, body: jsonEncode(need.toList()));
+      if (r.statusCode == 200) {
+        for (final e in (jsonDecode(utf8.decode(r.bodyBytes)) as List)) {
+          final g = '${e['GameName'] ?? ''}';
+          if (g.isNotEmpty) nameCache['${e['Subject']}'] = '$g#${e['TagLine'] ?? ''}';
+        }
+      }
+    } catch (_) {}
+  }
+  for (final x in players) {
+    final n = nameCache['${x['subject']}'];
+    if (n != null && '${x['gameName'] ?? ''}'.isEmpty) {
+      final i = n.indexOf('#');
+      x['gameName'] = i < 0 ? n : n.substring(0, i);
+      x['tagLine'] = i < 0 ? '' : n.substring(i + 1);
+    }
+  }
+}
+
 Future<dynamic> pvp(StoreData d, String path) async {
   final r = await http.get(Uri.parse('https://pd.${d.shard}.a.pvp.net/$path'), headers: d.hdr);
   if (r.statusCode != 200) throw 'HTTP ${r.statusCode}';
@@ -1642,6 +1674,11 @@ Future<Map> loadProfile(StoreData d) async {
   if (out['loadout'] == null) out['loErr'] = err;
   try { out['mmr'] = await pvp(d, 'mmr/v1/players/${d.puuid}'); } catch (_) {}
   try {
+    final x = await pvp(d, 'account-xp/v1/players/${d.puuid}');
+    final l = x['Progress']?['Level'];
+    if (l is num && l > 0) out['level'] = l.toInt();
+  } catch (_) {}
+  try {
     final id = out['loadout']?['Identity']?['PlayerCardID'];
     if (id != null) out['card'] = await api('playercards/$id');
     final tid = out['loadout']?['Identity']?['PlayerTitleID'];
@@ -1663,6 +1700,7 @@ Future<List> loadMatches(StoreData d) async {
       () async {
         try {
           final j = await pvp(d, 'match-details/v1/matches/$id');
+          await fillNames(d, j['players'] as List);
           final me = (j['players'] as List).firstWhere((p) => '${p['subject']}' == d.puuid) as Map;
           Map? mine, other;
           for (final t in (j['teams'] ?? [])) {
@@ -1765,7 +1803,8 @@ class _CareerViewState extends State<CareerView> {
   Widget build(BuildContext c) {
     final p = widget.p, d = widget.d;
     final card = p['card'], title = p['title'], mmr = p['mmr'];
-    final lvl = p['loadout']?['Identity']?['AccountLevel'];
+    final lvl0 = p['level'] ?? p['loadout']?['Identity']?['AccountLevel'];
+    final lvl = (lvl0 is num && lvl0 > 0) ? lvl0 : (d.level > 0 ? d.level : null);
     final tiers = (p['tiers'] as List?) ?? [];
     final tierTable = tiers.isNotEmpty ? ((tiers.last['tiers'] ?? []) as List) : [];
     Map? tierOf(int n) {
